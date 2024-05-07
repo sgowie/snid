@@ -35,12 +35,19 @@ import (
 
 	"src.agwa.name/go-listener/proxy"
 	"src.agwa.name/go-listener/tlsutil"
+
+	"slices"
+	"encoding/json"
+	"io/ioutil"
+	"regexp"
+	"fmt"
 )
 
 type Server struct {
 	Backend         BackendDialer
 	ProxyProtocol   bool
 	DefaultHostname string
+	AllowedNames 	[]string
 }
 
 func (server *Server) peekClientHello(clientConn net.Conn) (*tls.ClientHelloInfo, net.Conn, error) {
@@ -62,6 +69,11 @@ func (server *Server) peekClientHello(clientConn net.Conn) (*tls.ClientHelloInfo
 			return nil, nil, errors.New("no SNI provided and DefaultHostname not set")
 		}
 		clientHello.ServerName = server.DefaultHostname
+	}
+
+
+	if ( len(server.AllowedNames)!=0 && !slices.Contains(server.AllowedNames, clientHello.ServerName)) {
+		return nil, nil, errors.New(fmt.Sprintf("Whitelist does not contain domain %s", clientHello.ServerName))
 	}
 
 	return clientHello, peekedClientConn, err
@@ -104,6 +116,10 @@ func (server *Server) handleConnection(clientConn net.Conn) {
 }
 
 func (server *Server) Serve(listener net.Listener) error {
+	err := server.loadWhitelist("whitelist.json")
+	if err != nil {
+		log.Println("Cannot populate whitelist")
+	}
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
@@ -115,4 +131,41 @@ func (server *Server) Serve(listener net.Listener) error {
 		}
 		go server.handleConnection(conn)
 	}
+}
+
+func (server *Server) loadWhitelist(filename string) error {
+
+	fileData, err := ioutil.ReadFile(filename)
+	if err != nil {
+		log.Println("Error opening whitelist file ", filename)
+	}
+	var jsonData map[string]interface{}
+	err = json.Unmarshal(fileData, &jsonData)
+	if err != nil {
+		log.Println(filename, "Does not contain a list of domains")
+		log.Println(fileData)
+		return nil
+	}
+	candidateDomains := jsonData["domains"].([]interface{})
+
+	newWhiteList := domainFilter(candidateDomains)
+	
+	log.Println("Filtered provided whitelist to : ", newWhiteList)
+	//.. enforce characters in domain list
+	server.AllowedNames = newWhiteList;
+	return nil
+}
+
+func domainFilter(candidates []interface{}) (filtered []string) {
+	domainRequirement := regexp.MustCompile(`(?:[^@\n]+@)?(?:www\.)?([^:\/\n]+)`)
+	// domainRequirement := regexp.MustCompile(`^(([a-zA-Z]{1})|([a-zA-Z]{1}[a-zA-Z]{1})|([a-zA-Z]{1}[0-9]{1})|([0-9]{1}[a-zA-Z]{1})|([a-zA-Z0-9][a-zA-Z0-9-_]{1,61}[a-zA-Z0-9]))\.([a-zA-Z]{2,6}|[a-zA-Z0-9-]{2,30}\.[a-zA-Z]{2,3})$`)
+	for _, testing := range candidates {
+		s := testing.(string)
+		if domainRequirement.MatchString(s) {
+			filtered = append(filtered, s)
+		} else {
+			log.Println("Invalid domain in whitelist file : ", s)
+		}
+	}
+	return filtered
 }
