@@ -151,14 +151,12 @@ func (server *Server) loadWhitelist(filename string) error {
 	newWhiteList := domainFilter(candidateDomains)
 	
 	log.Println("Filtered provided whitelist to : ", newWhiteList)
-	//.. enforce characters in domain list
 	server.AllowedNames = newWhiteList;
 	return nil
 }
 
 func domainFilter(candidates []interface{}) (filtered []string) {
 	domainRequirement := regexp.MustCompile(`(?:[^@\n]+@)?(?:www\.)?([^:\/\n]+)`)
-	// domainRequirement := regexp.MustCompile(`^(([a-zA-Z]{1})|([a-zA-Z]{1}[a-zA-Z]{1})|([a-zA-Z]{1}[0-9]{1})|([0-9]{1}[a-zA-Z]{1})|([a-zA-Z0-9][a-zA-Z0-9-_]{1,61}[a-zA-Z0-9]))\.([a-zA-Z]{2,6}|[a-zA-Z0-9-]{2,30}\.[a-zA-Z]{2,3})$`)
 	for _, testing := range candidates {
 		s := testing.(string)
 		if domainRequirement.MatchString(s) {
