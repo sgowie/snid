@@ -44,6 +44,7 @@ func main() {
 		backendCidr     []*net.IPNet
 		backendPort     int
 		nat46Prefix     net.IP
+		filterJson		string
 	}
 	flag.Func("listen", "Socket to listen on (repeatable)", func(arg string) error {
 		flags.listen = append(flags.listen, arg)
@@ -53,6 +54,7 @@ func main() {
 	flag.StringVar(&flags.mode, "mode", "", "unix, tcp, or nat46")
 	flag.BoolVar(&flags.proxyProto, "proxy-proto", false, "Use PROXY protocol when talking to backend (tcp, unix modes)")
 	flag.StringVar(&flags.unixDirectory, "unix-directory", "", "Path to directory containing backend UNIX sockets (unix mode)")
+	flag.StringVar(&flags.filterJson, "filter-json", "", "JSON file containing domain filters")
 	flag.Func("backend-cidr", "CIDR of allowed backends (repeatable) (tcp, nat46 modes)", func(arg string) error {
 		_, ipnet, err := net.ParseCIDR(arg)
 		if err != nil {
@@ -77,6 +79,7 @@ func main() {
 	server := &Server{
 		ProxyProtocol:   flags.proxyProto,
 		DefaultHostname: flags.defaultHostname,
+		FilterJson: flags.filterJson,
 	}
 
 	switch flags.mode {

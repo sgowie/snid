@@ -47,7 +47,11 @@ type Server struct {
 	Backend         BackendDialer
 	ProxyProtocol   bool
 	DefaultHostname string
+	FilterJson		string
 	AllowedNames 	[]string
+	DeniedNames		[]string
+	AllowedPatterns []*regexp.Regexp
+	DeniedPatterns	[]*regexp.Regexp
 }
 
 func (server *Server) peekClientHello(clientConn net.Conn) (*tls.ClientHelloInfo, net.Conn, error) {
@@ -71,10 +75,28 @@ func (server *Server) peekClientHello(clientConn net.Conn) (*tls.ClientHelloInfo
 		clientHello.ServerName = server.DefaultHostname
 	}
 
-
-	if ( len(server.AllowedNames)!=0 && !slices.Contains(server.AllowedNames, clientHello.ServerName)) {
-		return nil, nil, errors.New(fmt.Sprintf("Whitelist does not contain domain %s", clientHello.ServerName))
+	// Evaluate Blacklisted names then patterns first
+	if ( len(server.DeniedNames)!=0 && slices.Contains(server.DeniedNames, clientHello.ServerName)) {
+		return nil, nil, errors.New(fmt.Sprintf("Blacklist contains domain %s", clientHello.ServerName))
 	}
+	if ( len(server.DeniedPatterns)!=0 && patternMatch(server.DeniedPatterns, clientHello.ServerName)) {
+		return nil, nil, errors.New(fmt.Sprintf("Blacklist Pattern matches domain %s", clientHello.ServerName))
+	}
+
+	// If both whitelist and whitelist regex are defined, either success is good enough to continue
+	if ( len(server.AllowedNames)!=0 && len(server.AllowedPatterns)!=0 ) {
+			if ( !slices.Contains(server.AllowedNames, clientHello.ServerName) && !patternMatch(server.AllowedPatterns, clientHello.ServerName) )	{
+				return nil, nil, errors.New(fmt.Sprintf("Whitelist and Patterns do not match domain %s", clientHello.ServerName))
+			}
+	} else {
+		if ( len(server.AllowedNames)!=0 && !slices.Contains(server.AllowedNames, clientHello.ServerName)) {
+			return nil, nil, errors.New(fmt.Sprintf("Whitelist does not contain domain %s", clientHello.ServerName))
+		}
+		if ( len(server.AllowedPatterns)!=0 && !patternMatch(server.AllowedPatterns, clientHello.ServerName)) {
+			return nil, nil, errors.New(fmt.Sprintf("Whitelist Pattern does not match domain %s", clientHello.ServerName))
+		}
+	}
+
 
 	return clientHello, peekedClientConn, err
 }
@@ -116,9 +138,11 @@ func (server *Server) handleConnection(clientConn net.Conn) {
 }
 
 func (server *Server) Serve(listener net.Listener) error {
-	err := server.loadWhitelist("whitelist.json")
-	if err != nil {
-		log.Println("Cannot populate whitelist")
+	if( len(server.FilterJson)>0 ){
+		err := server.loadFilterList(server.FilterJson)
+		if err != nil {
+			log.Println("Cannot parse FilterJson")
+		}
 	}
 	for {
 		conn, err := listener.Accept()
@@ -133,8 +157,7 @@ func (server *Server) Serve(listener net.Listener) error {
 	}
 }
 
-func (server *Server) loadWhitelist(filename string) error {
-
+func (server *Server) loadFilterList(filename string) error {
 	fileData, err := ioutil.ReadFile(filename)
 	if err != nil {
 		log.Println("Error opening whitelist file ", filename)
@@ -142,28 +165,76 @@ func (server *Server) loadWhitelist(filename string) error {
 	var jsonData map[string]interface{}
 	err = json.Unmarshal(fileData, &jsonData)
 	if err != nil {
-		log.Println(filename, "Does not contain a list of domains")
+		log.Println(filename, "Does not contain valid json")
 		log.Println(fileData)
 		return nil
 	}
-	candidateDomains := jsonData["domains"].([]interface{})
+	candidateWhitelistNames := jsonData["whitelist_names"].([]interface{})
+	candidateBlacklistNames := jsonData["blacklist_names"].([]interface{})
+	candidateWhitelistPatterns := jsonData["whitelist_patterns"].([]interface{})
+	candidateBlacklistPatterns := jsonData["blacklist_patterns"].([]interface{})
 
-	newWhiteList := domainFilter(candidateDomains)
+	if len(candidateBlacklistNames) >0 {
+		newBlackList := domainFilter(candidateBlacklistNames)
+		log.Printf("Filtered provided blacklist to :  %#q", newBlackList)
+		server.DeniedNames = newBlackList;
+	}
+	if len(candidateBlacklistPatterns) > 0 {
+		newBlackPattern, matchedStrings := patternFilter(candidateBlacklistPatterns)
+		log.Printf("Filtered provided blacklist regex to :  %#q", matchedStrings)
+		server.DeniedPatterns = newBlackPattern
+	}
+
+	if len(candidateWhitelistNames) >0 {
+		newWhiteList := domainFilter(candidateWhitelistNames)
+		log.Printf("Filtered provided whitelist to :  %#q", newWhiteList)
+		server.AllowedNames = newWhiteList;
+	}
+
+	if len(candidateWhitelistPatterns) > 0 {
+		newWhitePattern, matchedStrings := patternFilter(candidateWhitelistPatterns)
+		log.Printf("Filtered provided whitelist regex to : %#q", matchedStrings)
+		server.AllowedPatterns = newWhitePattern
+	}
 	
-	log.Println("Filtered provided whitelist to : ", newWhiteList)
-	server.AllowedNames = newWhiteList;
 	return nil
 }
 
 func domainFilter(candidates []interface{}) (filtered []string) {
-	domainRequirement := regexp.MustCompile(`(?:[^@\n]+@)?(?:www\.)?([^:\/\n]+)`)
+	domainRequirement := regexp.MustCompile(`^(?:[^@\n]+@)?(?:www\.)?([^:\/\n]+).([a-z]){2,}$`)
 	for _, testing := range candidates {
 		s := testing.(string)
-		if domainRequirement.MatchString(s) {
+		if domainRequirement.MatchString(s) && !slices.Contains(filtered, s) {
 			filtered = append(filtered, s)
 		} else {
-			log.Println("Invalid domain in whitelist file : ", s)
+			log.Println("Invalid or duplicate domain in whitelist file : ", s)
 		}
 	}
 	return filtered
+}
+
+func patternFilter(candidates []interface{}) (filtered []*regexp.Regexp, summary []string) {
+	for _, testing := range candidates {
+		s := testing.(string)
+		regexpProbe, err := regexp.Compile(s)
+		if err != nil {
+			log.Println("Invalid regex ", s)
+			log.Println(err)
+			continue;
+		}
+		if ( !slices.Contains(summary,s) ){
+			filtered = append(filtered,regexpProbe)
+			summary = append(summary,s)
+		}
+	}
+	return filtered, summary
+}
+
+func patternMatch(patterns []*regexp.Regexp, needle string) (bool) {
+	for _, pattern := range patterns {
+		if pattern.MatchString(needle) {
+			return true
+		}
+	}
+	return false
 }
